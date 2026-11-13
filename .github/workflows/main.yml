@@ -193,15 +193,15 @@ jobs:
           set -e
           mkdir -p release-artifacts
 
-          APK_FILE="$(find android/app/build/outputs -type f -name '*.apk' ! -path '*androidTest*' | head -n 1)"
-          AAB_FILE="$(find android/app/build/outputs -type f -name '*.aab' | head -n 1)"
+          APK_FILE="$(find build android/app/build -type f -name '*.apk' ! -path '*androidTest*' 2>/dev/null | head -n 1)"
+          AAB_FILE="$(find build android/app/build -type f -name '*.aab' 2>/dev/null | head -n 1)"
 
           echo "APK found: ${APK_FILE:-NOT FOUND}"
           echo "AAB found: ${AAB_FILE:-NOT FOUND}"
 
           if [ -z "$APK_FILE" ] || [ -z "$AAB_FILE" ]; then
             echo "ERROR: APK or AAB was not found. Available output files:"
-            find android/app/build/outputs -type f -print || true
+            find build android/app/build -type f \( -name '*.apk' -o -name '*.aab' \) -print 2>/dev/null || true
             exit 1
           fi
 
@@ -219,6 +219,9 @@ jobs:
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@v4
         with:
+        name: school-management-system-signed-aab
+          path: release-artifacts/school-management-system-release.aab
+          if-no-files-found: error
           name: school-management-system-signed-aab
           path: release-artifacts/school-management-system-release.aab
           if-no-files-found: error
