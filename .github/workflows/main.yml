@@ -1,18 +1,111 @@
-if not plugins:
+name: Build School Management System APK and AAB
+
+'on':
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Check Flutter project
+        run: |
+          test -f pubspec.yaml
+          test -d lib
+          flutter --version
+
+      - name: Generate Android platform files
+        run: flutter create --project-name school_management_system --org com.ilyasmobile --platforms=android .
+
+      - name: Set application ID
+        shell: bash
+        run: |
+          set -e
+          if [ -f android/app/build.gradle.kts ]; then
+            sed -i 's/applicationId = ".*"/applicationId = "com.ilyasmobile.schoolmanagementsystem"/' android/app/build.gradle.kts
+          elif [ -f android/app/build.gradle ]; then
+            sed -i "s/applicationId .*/applicationId 'com.ilyasmobile.schoolmanagementsystem'/" android/app/build.gradle
+          else
+            echo "ERROR: Android app Gradle file not found."
+            exit 1
+          fi
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Decode upload keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -e
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "ERROR: One or more GitHub signing secrets are missing."
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_BASE64" | sed '/-----BEGIN CERTIFICATE-----/d; /-----END CERTIFICATE-----/d' | tr -d '\r\n ' | base64 --decode > android/app/upload-keystore.jks
+          test -s android/app/upload-keystore.jks
+          cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=upload-keystore.jks
+          EOF
+
+      - name: Configure Android release signing
+        shell: bash
+        run: |
+          set -e
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+          kts = Path("android/app/build.gradle.kts")
+          groovy = Path("android/app/build.gradle")
+          if kts.exists():
+              p = kts
+              s = p.read_text()
+              if "import java.util.Properties" not in s:
+                  s = "import java.util.Properties\\nimport java.io.FileInputStream\\n" + s
+              if "val keystoreProperties =" not in s:
+                  m = re.search(r"plugins\\s*\\{.*?\\}", s, re.S)
+                  if not m:
                       raise SystemExit("ERROR: Could not find plugins block in build.gradle.kts")
-                  setup = """
+                  setup = '''
           val keystoreProperties = Properties()
           val keystorePropertiesFile = rootProject.file("key.properties")
           if (keystorePropertiesFile.exists()) {
               keystoreProperties.load(FileInputStream(keystorePropertiesFile))
           }
-          """
-                  source = source[:plugins.end()] + "\n" + setup + "\n" + source[plugins.end():]
-              android_block = re.search(r"\bandroid\s*\{", source)
-              if not android_block:
-                  raise SystemExit("ERROR: Could not find android block in build.gradle.kts")
-              if 'create("release")' not in source:
-                  signing = """
+          '''
+                  s = s[:m.end()] + "\\n" + setup + "\\n" + s[m.end():]
+              if 'create("release")' not in s:
+                  m = re.search(r"\\bandroid\\s*\\{", s)
+                  if not m:
+                      raise SystemExit("ERROR: Could not find android block in build.gradle.kts")
+                  signing = '''
               signingConfigs {
                   create("release") {
                       keyAlias = keystoreProperties["keyAlias"] as String
@@ -21,41 +114,38 @@ if not plugins:
                       storePassword = keystoreProperties["storePassword"] as String
                   }
               }
-          """
-                  source = source[:android_block.end()] + "\n" + signing + "\n" + source[android_block.end():]
-              source = source.replace(
-                  'signingConfig = signingConfigs.getByName("debug")',
-                  'signingConfig = signingConfigs.getByName("release")'
-              )
-              release_block = re.search(r"release\s*\{", source)
-              if not release_block:
+          '''
+                  s = s[:m.end()] + "\\n" + signing + "\\n" + s[m.end():]
+              s = s.replace('signingConfig = signingConfigs.getByName("debug")',
+                            'signingConfig = signingConfigs.getByName("release")')
+              m = re.search(r"release\\s*\\{", s)
+              if not m:
                   raise SystemExit("ERROR: Could not find release buildType in build.gradle.kts")
-              if 'signingConfig = signingConfigs.getByName("release")' not in source[release_block.end():]:
-                  source = source[:release_block.end()] + '\n            signingConfig = signingConfigs.getByName("release")' + source[release_block.end():]
-              path.write_text(source)
-
+              if 'signingConfig = signingConfigs.getByName("release")' not in s[m.end():]:
+                  s = s[:m.end()] + '\\n            signingConfig = signingConfigs.getByName("release")' + s[m.end():]
+              p.write_text(s)
           elif groovy.exists():
-              path = groovy
-              source = path.read_text()
-              if "import java.util.Properties" not in source:
-                  source = "import java.util.Properties\nimport java.io.FileInputStream\n" + source
-              if "def keystoreProperties =" not in source:
-                  plugins = re.search(r"plugins\s*\{.*?\}", source, re.S)
-                  if not plugins:
+              p = groovy
+              s = p.read_text()
+              if "import java.util.Properties" not in s:
+                  s = "import java.util.Properties\\nimport java.io.FileInputStream\\n" + s
+              if "def keystoreProperties =" not in s:
+                  m = re.search(r"plugins\\s*\\{.*?\\}", s, re.S)
+                  if not m:
                       raise SystemExit("ERROR: Could not find plugins block in build.gradle")
-                  setup = """
+                  setup = '''
           def keystoreProperties = new Properties()
           def keystorePropertiesFile = rootProject.file('key.properties')
           if (keystorePropertiesFile.exists()) {
               keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
           }
-          """
-                  source = source[:plugins.end()] + "\n" + setup + "\n" + source[plugins.end():]
-              android_block = re.search(r"\bandroid\s*\{", source)
-              if not android_block:
-                  raise SystemExit("ERROR: Could not find android block in build.gradle")
-              if "signingConfigs {" not in source:
-                  signing = """
+          '''
+                  s = s[:m.end()] + "\\n" + setup + "\\n" + s[m.end():]
+              if "signingConfigs {" not in s:
+                  m = re.search(r"\\bandroid\\s*\\{", s)
+                  if not m:
+                      raise SystemExit("ERROR: Could not find android block in build.gradle")
+                  signing = '''
               signingConfigs {
                   release {
                       keyAlias keystoreProperties['keyAlias']
@@ -64,51 +154,43 @@ if not plugins:
                       storePassword keystoreProperties['storePassword']
                   }
               }
-          """
-                  source = source[:android_block.end()] + "\n" + signing + "\n" + source[android_block.end():]
-              source = source.replace("signingConfig signingConfigs.debug", "signingConfig signingConfigs.release")
-              release_block = re.search(r"release\s*\{", source)
-              if not release_block:
+          '''
+                  s = s[:m.end()] + "\\n" + signing + "\\n" + s[m.end():]
+              s = s.replace("signingConfig signingConfigs.debug", "signingConfig signingConfigs.release")
+              m = re.search(r"release\\s*\\{", s)
+              if not m:
                   raise SystemExit("ERROR: Could not find release buildType in build.gradle")
-              if "signingConfig signingConfigs.release" not in source[release_block.end():]:
-                  source = source[:release_block.end()] + "\n            signingConfig signingConfigs.release" + source[release_block.end():]
-              path.write_text(source)
+              if "signingConfig signingConfigs.release" not in s[m.end():]:
+                  s = s[:m.end()] + "\\n            signingConfig signingConfigs.release" + s[m.end():]
+              p.write_text(s)
           else:
               raise SystemExit("ERROR: Android app Gradle file not found.")
-          print("Release signing configuration added.")
+          print("Release signing configured.")
           PY
 
       - name: Analyze Dart source
         run: flutter analyze lib --no-fatal-infos --no-fatal-warnings
 
       - name: Build signed release APK
-        working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleRelease -x :image_picker_android:lintVitalAnalyzeRelease
+        run: flutter build apk --release
 
       - name: Build signed Play Store AAB
-        working-directory: android
-        run: ./gradlew bundleRelease -x :image_picker_android:lintVitalAnalyzeRelease
+        run: flutter build appbundle --release
 
       - name: Collect release files
         shell: bash
         run: |
           set -e
           mkdir -p release-artifacts
-
-          APK_FILE="$(find build android/app/build -type f -name '*.apk' ! -path '*androidTest*' 2>/dev/null | head -n 1)"
-          AAB_FILE="$(find build android/app/build -type f -name '*.aab' 2>/dev/null | head -n 1)"
-
+          APK_FILE="$(find . -type f -name '*.apk' ! -path './.git/*' ! -path '*/androidTest/*' | head -n 1)"
+          AAB_FILE="$(find . -type f -name '*.aab' ! -path './.git/*' | head -n 1)"
           echo "APK found: ${APK_FILE:-NOT FOUND}"
           echo "AAB found: ${AAB_FILE:-NOT FOUND}"
-
           if [ -z "$APK_FILE" ] || [ -z "$AAB_FILE" ]; then
-            echo "ERROR: APK or AAB was not found. Available output files:"
-            find build android/app/build -type f \( -name '*.apk' -o -name '*.aab' \) -print 2>/dev/null || true
+            echo "ERROR: APK or AAB was not created. Files found:"
+            find . -type f \( -name '*.apk' -o -name '*.aab' \) ! -path './.git/*' -print || true
             exit 1
           fi
-
           cp "$APK_FILE" release-artifacts/school-management-system-release.apk
           cp "$AAB_FILE" release-artifacts/school-management-system-release.aab
           ls -lh release-artifacts
