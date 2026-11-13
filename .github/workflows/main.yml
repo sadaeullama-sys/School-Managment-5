@@ -1,101 +1,10 @@
+if "import java.util.Properties" not in source:
+                  source = "import java.util.Properties\nimport java.io.FileInputStream\n" + source
 
-name: Build School Management System APK and AAB
-
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-
-permissions:
-  contents: read
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-          cache: true
-
-      - name: Generate Android platform files
-        run: flutter create --project-name school_management_system --org com.ilyasmobile --platforms=android .
-
-      - name: Set application ID
-        shell: bash
-        run: |
-          if [ -f android/app/build.gradle.kts ]; then
-            sed -i 's/applicationId = ".*"/applicationId = "com.ilyasmobile.schoolmanagementsystem"/' android/app/build.gradle.kts
-          elif [ -f android/app/build.gradle ]; then
-            sed -i "s/applicationId .*/applicationId 'com.ilyasmobile.schoolmanagementsystem'/" android/app/build.gradle
-          else
-            echo "Android Gradle file not found"
-            exit 1
-          fi
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Configure Release Signing and Android Lint
-        shell: bash
-        env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          set -e
-
-          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
-            echo "ERROR: One or more GitHub signing secrets are missing."
-            exit 1
-          fi
-
-          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
-          test -s android/app/upload-keystore.jks
-
-          cat > android/key.properties <<EOF
-          storePassword=$KEYSTORE_PASSWORD
-          keyPassword=$KEY_PASSWORD
-          keyAlias=$KEY_ALIAS
-          storeFile=upload-keystore.jks
-          EOF
-
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-
-          kts = Path("android/app/build.gradle.kts")
-          groovy = Path("android/app/build.gradle")
-
-          if kts.exists():
-              p = kts
-              text = p.read_text()
-
-              imports = (
-                  "import java.util.Properties\n"
-                  "import java.io.FileInputStream\n"
-              )
-              if "import java.util.Properties" not in text:
-                  text = imports + text
-
-              if "val keystoreProperties =" not in text:
-                  match = re.search(r"plugins\s*\{.*?\}", text, re.S)
-                  if not match:
-                      raise SystemExit("Could not find Kotlin plugins block")
-
+              if "val keystoreProperties =" not in source:
+                  plugins = re.search(r"plugins\s*\{.*?\}", source, re.S)
+                  if not plugins:
+                      raise SystemExit("ERROR: Could not find the plugins block in build.gradle.kts")
                   setup = """
           val keystoreProperties = Properties()
           val keystorePropertiesFile = rootProject.file("key.properties")
@@ -103,23 +12,13 @@ jobs:
               keystoreProperties.load(FileInputStream(keystorePropertiesFile))
           }
           """
-                  text = text[:match.end()] + "\n" + setup + "\n" + text[match.end():]
+                  source = source[:plugins.end()] + "\n" + setup + "\n" + source[plugins.end():]
 
-              android_match = re.search(r"\bandroid\s*\{", text)
-              if not android_match:
-                  raise SystemExit("Could not find Kotlin android block")
-
-              if "checkReleaseBuilds = false" not in text:
-                  lint_config = """
-              lint {
-                  checkReleaseBuilds = false
-                  abortOnError = false
-              }
-
-          """
-                  text = text[:android_match.end()] + "\n" + lint_config + text[android_match.end():]
-
-              signing = """
+              if "create(\"release\")" not in source:
+                  android_block = re.search(r"\bandroid\s*\{", source)
+                  if not android_block:
+                      raise SystemExit("ERROR: Could not find android block in build.gradle.kts")
+                  signing = """
               signingConfigs {
                   create("release") {
                       keyAlias = keystoreProperties["keyAlias"] as String
@@ -129,46 +28,34 @@ jobs:
                   }
               }
           """
+                  source = source[:android_block.end()] + "\n" + signing + "\n" + source[android_block.end():]
 
-              if 'create("release")' not in text:
-                  match = re.search(r"\s+buildTypes\s*\{", text)
-                  if not match:
-                      raise SystemExit("Could not find Kotlin buildTypes block")
-                  text = text[:match.start()] + "\n" + signing + "\n" + text[match.start():]
+              release_block = re.search(r"release\s*\{", source)
+              if not release_block:
+                  raise SystemExit("ERROR: Could not find release buildType in build.gradle.kts")
 
-              text = text.replace(
-                  'signingConfig = signingConfigs.getByName("debug")',
-                  'signingConfig = signingConfigs.getByName("release")'
-              )
-
-              if 'signingConfig = signingConfigs.getByName("release")' not in text:
-                  text, count = re.subn(
-                      r'(release\s*\{)',
-                      r'\1\n            signingConfig = signingConfigs.getByName("release")',
-                      text,
-                      count=1
+              # Set release signing inside the release buildType.
+              after_release = source[release_block.end():]
+              if 'signingConfig = signingConfigs.getByName("release")' not in after_release:
+                  source = (
+                      source[:release_block.end()]
+                      + '\n            signingConfig = signingConfigs.getByName("release")'
+                      + source[release_block.end():]
                   )
-                  if count == 0:
-                      raise SystemExit("Could not configure Kotlin release signing")
 
-              p.write_text(text)
+              path.write_text(source)
 
-          elif groovy.exists():
-              p = groovy
-              text = p.read_text()
+          elif gradle_groovy.exists():
+              path = gradle_groovy
+              source = path.read_text()
 
-              imports = (
-                  "import java.util.Properties\n"
-                  "import java.io.FileInputStream\n"
-              )
-              if "import java.util.Properties" not in text:
-                  text = imports + text
+              if "import java.util.Properties" not in source:
+                  source = "import java.util.Properties\nimport java.io.FileInputStream\n" + source
 
-              if "def keystoreProperties =" not in text:
-                  match = re.search(r"plugins\s*\{.*?\}", text, re.S)
-                  if not match:
-                      raise SystemExit("Could not find Groovy plugins block")
-
+              if "def keystoreProperties =" not in source:
+                  plugins = re.search(r"plugins\s*\{.*?\}", source, re.S)
+                  if not plugins:
+                      raise SystemExit("ERROR: Could not find plugins block in build.gradle")
                   setup = """
           def keystoreProperties = new Properties()
           def keystorePropertiesFile = rootProject.file('key.properties')
@@ -176,23 +63,13 @@ jobs:
               keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
           }
           """
-                  text = text[:match.end()] + "\n" + setup + "\n" + text[match.end():]
+                  source = source[:plugins.end()] + "\n" + setup + "\n" + source[plugins.end():]
 
-              android_match = re.search(r"\bandroid\s*\{", text)
-              if not android_match:
-                  raise SystemExit("Could not find Groovy android block")
-
-              if "checkReleaseBuilds = false" not in text:
-                  lint_config = """
-              lint {
-                  checkReleaseBuilds = false
-                  abortOnError = false
-              }
-
-          """
-                  text = text[:android_match.end()] + "\n" + lint_config + text[android_match.end():]
-
-              signing = """
+              if "signingConfigs {" not in source:
+                  android_block = re.search(r"\bandroid\s*\{", source)
+                  if not android_block:
+                      raise SystemExit("ERROR: Could not find android block in build.gradle")
+                  signing = """
               signingConfigs {
                   release {
                       keyAlias keystoreProperties['keyAlias']
@@ -202,49 +79,34 @@ jobs:
                   }
               }
           """
+                  source = source[:android_block.end()] + "\n" + signing + "\n" + source[android_block.end():]
 
-              if "signingConfigs {" not in text:
-                  match = re.search(r"\s+buildTypes\s*\{", text)
-                  if not match:
-                      raise SystemExit("Could not find Groovy buildTypes block")
-                  text = text[:match.start()] + "\n" + signing + "\n" + text[match.start():]
-
-              text = text.replace(
-                  "signingConfig signingConfigs.debug",
-                  "signingConfig signingConfigs.release"
-              )
-
-              if "signingConfig signingConfigs.release" not in text:
-                  text, count = re.subn(
-                      r"(release\s*\{)",
-                      r"\1\n            signingConfig signingConfigs.release",
-                      text,
-                      count=1
+              release_block = re.search(r"release\s*\{", source)
+              if not release_block:
+                  raise SystemExit("ERROR: Could not find release buildType in build.gradle")
+              after_release = source[release_block.end():]
+              if "signingConfig signingConfigs.release" not in after_release:
+                  source = (
+                      source[:release_block.end()]
+                      + "\n            signingConfig signingConfigs.release"
+                      + source[release_block.end():]
                   )
-                  if count == 0:
-                      raise SystemExit("Could not configure Groovy release signing")
 
-              p.write_text(text)
-
+              path.write_text(source)
           else:
-              raise SystemExit("Android app Gradle file not found")
+              raise SystemExit("ERROR: Android app Gradle file not found.")
 
-          print("Release signing and Android lint configuration completed.")
+          print("Release signing configuration added.")
           PY
 
       - name: Analyze Dart source
         run: flutter analyze lib --no-fatal-infos --no-fatal-warnings
 
-      - name: Build release APK
-        working-directory: android
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleRelease
+      - name: Build signed release APK
+        run: flutter build apk --release
 
       - name: Build signed Play Store AAB
-        working-directory: android
-        run: |
-          ./gradlew bundleRelease
+        run: flutter build appbundle --release
 
       - name: Verify release files
         run: |
@@ -263,5 +125,3 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: school-management-system-signed-aab
-          path: build/app/outputs/bundle/release/app-release.aab
-          if-no-files-found: error
