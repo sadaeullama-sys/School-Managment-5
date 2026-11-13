@@ -12,7 +12,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -63,18 +62,15 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -e
-
           if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
             echo "ERROR: One or more GitHub signing secrets are missing."
             exit 1
           fi
 
-          # Decode the Windows certutil -encode output, including its PEM header/footer.
           printf '%s' "$KEYSTORE_BASE64" \
             | sed '/-----BEGIN CERTIFICATE-----/d; /-----END CERTIFICATE-----/d' \
             | tr -d '\r\n ' \
             | base64 --decode > android/app/upload-keystore.jks
-
           test -s android/app/upload-keystore.jks
 
           cat > android/key.properties <<EOF
@@ -94,10 +90,8 @@ jobs:
           if kts.exists():
               path = kts
               source = path.read_text()
-
               if "import java.util.Properties" not in source:
                   source = "import java.util.Properties\nimport java.io.FileInputStream\n" + source
-
               if "val keystoreProperties =" not in source:
                   plugins = re.search(r"plugins\s*\{.*?\}", source, re.S)
                   if not plugins:
@@ -110,11 +104,9 @@ jobs:
           }
           """
                   source = source[:plugins.end()] + "\n" + setup + "\n" + source[plugins.end():]
-
               android_block = re.search(r"\bandroid\s*\{", source)
               if not android_block:
                   raise SystemExit("ERROR: Could not find android block in build.gradle.kts")
-
               if 'create("release")' not in source:
                   signing = """
               signingConfigs {
@@ -127,34 +119,22 @@ jobs:
               }
           """
                   source = source[:android_block.end()] + "\n" + signing + "\n" + source[android_block.end():]
-
-              # Replace the default debug signing used by Flutter's release build.
               source = source.replace(
                   'signingConfig = signingConfigs.getByName("debug")',
                   'signingConfig = signingConfigs.getByName("release")'
               )
-
               release_block = re.search(r"release\s*\{", source)
               if not release_block:
                   raise SystemExit("ERROR: Could not find release buildType in build.gradle.kts")
-
-              after_release = source[release_block.end():]
-              if 'signingConfig = signingConfigs.getByName("release")' not in after_release:
-                  source = (
-                      source[:release_block.end()]
-                      + '\n            signingConfig = signingConfigs.getByName("release")'
-                      + source[release_block.end():]
-                  )
-
+              if 'signingConfig = signingConfigs.getByName("release")' not in source[release_block.end():]:
+                  source = source[:release_block.end()] + '\n            signingConfig = signingConfigs.getByName("release")' + source[release_block.end():]
               path.write_text(source)
 
           elif groovy.exists():
               path = groovy
               source = path.read_text()
-
               if "import java.util.Properties" not in source:
                   source = "import java.util.Properties\nimport java.io.FileInputStream\n" + source
-
               if "def keystoreProperties =" not in source:
                   plugins = re.search(r"plugins\s*\{.*?\}", source, re.S)
                   if not plugins:
@@ -167,11 +147,9 @@ jobs:
           }
           """
                   source = source[:plugins.end()] + "\n" + setup + "\n" + source[plugins.end():]
-
               android_block = re.search(r"\bandroid\s*\{", source)
               if not android_block:
                   raise SystemExit("ERROR: Could not find android block in build.gradle")
-
               if "signingConfigs {" not in source:
                   signing = """
               signingConfigs {
@@ -184,56 +162,48 @@ jobs:
               }
           """
                   source = source[:android_block.end()] + "\n" + signing + "\n" + source[android_block.end():]
-
-              source = source.replace(
-                  "signingConfig signingConfigs.debug",
-                  "signingConfig signingConfigs.release"
-              )
-
+              source = source.replace("signingConfig signingConfigs.debug", "signingConfig signingConfigs.release")
               release_block = re.search(r"release\s*\{", source)
               if not release_block:
                   raise SystemExit("ERROR: Could not find release buildType in build.gradle")
-
-              after_release = source[release_block.end():]
-              if "signingConfig signingConfigs.release" not in after_release:
-                  source = (
-                      source[:release_block.end()]
-                      + "\n            signingConfig signingConfigs.release"
-                      + source[release_block.end():]
-                  )
-
+              if "signingConfig signingConfigs.release" not in source[release_block.end():]:
+                  source = source[:release_block.end()] + "\n            signingConfig signingConfigs.release" + source[release_block.end():]
               path.write_text(source)
           else:
               raise SystemExit("ERROR: Android app Gradle file not found.")
-
           print("Release signing configuration added.")
           PY
 
       - name: Analyze Dart source
         run: flutter analyze lib --no-fatal-infos --no-fatal-warnings
 
+      # Work around the image_picker_android Lint detector crash seen in CI.
       - name: Build signed release APK
-        run: flutter build apk --release
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease -x :image_picker_android:lintVitalAnalyzeRelease
 
       - name: Build signed Play Store AAB
-        run: flutter build appbundle --release
+        working-directory: android
+        run: ./gradlew bundleRelease -x :image_picker_android:lintVitalAnalyzeRelease
 
       - name: Verify release files
         run: |
-          test -s build/app/outputs/flutter-apk/app-release.apk
-          test -s build/app/outputs/bundle/release/app-release.aab
+          test -s android/app/build/outputs/apk/release/app-release.apk
+          test -s android/app/build/outputs/bundle/release/app-release.aab
           echo "APK and AAB files created successfully."
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: school-management-system-release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+          path: android/app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
 
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@v4
         with:
           name: school-management-system-signed-aab
-          path: build/app/outputs/bundle/release/app-release.aab
+          path: android/app/build/outputs/bundle/release/app-release.aab
           if-no-files-found: error
