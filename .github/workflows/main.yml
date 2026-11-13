@@ -177,7 +177,6 @@ jobs:
       - name: Analyze Dart source
         run: flutter analyze lib --no-fatal-infos --no-fatal-warnings
 
-      # Work around the image_picker_android Lint detector crash seen in CI.
       - name: Build signed release APK
         working-directory: android
         run: |
@@ -188,22 +187,38 @@ jobs:
         working-directory: android
         run: ./gradlew bundleRelease -x :image_picker_android:lintVitalAnalyzeRelease
 
-      - name: Verify release files
+      - name: Collect release files
+        shell: bash
         run: |
-          test -s android/app/build/outputs/apk/release/app-release.apk
-          test -s android/app/build/outputs/bundle/release/app-release.aab
-          echo "APK and AAB files created successfully."
+          set -e
+          mkdir -p release-artifacts
+
+          APK_FILE="$(find android/app/build/outputs -type f -name '*.apk' ! -path '*androidTest*' | head -n 1)"
+          AAB_FILE="$(find android/app/build/outputs -type f -name '*.aab' | head -n 1)"
+
+          echo "APK found: ${APK_FILE:-NOT FOUND}"
+          echo "AAB found: ${AAB_FILE:-NOT FOUND}"
+
+          if [ -z "$APK_FILE" ] || [ -z "$AAB_FILE" ]; then
+            echo "ERROR: APK or AAB was not found. Available output files:"
+            find android/app/build/outputs -type f -print || true
+            exit 1
+          fi
+
+          cp "$APK_FILE" release-artifacts/school-management-system-release.apk
+          cp "$AAB_FILE" release-artifacts/school-management-system-release.aab
+          ls -lh release-artifacts
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: school-management-system-release-apk
-          path: android/app/build/outputs/apk/release/app-release.apk
+          path: release-artifacts/school-management-system-release.apk
           if-no-files-found: error
 
       - name: Upload signed AAB artifact
         uses: actions/upload-artifact@v4
         with:
           name: school-management-system-signed-aab
-          path: android/app/build/outputs/bundle/release/app-release.aab
+          path: release-artifacts/school-management-system-release.aab
           if-no-files-found: error
